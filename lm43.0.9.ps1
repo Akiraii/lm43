@@ -1,15 +1,16 @@
 <#
 .SYNOPSIS
     Запрос статуса /api/v2/status с Basic-аутентификацией, парсингом JSON,
-    предложением инициализации при "not_configured" и ожиданием при "initialization".
+    предложением инициализации при "не сконфигурирован" и ожиданием при "инициализация".
     В режиме ожидания показывает изменение данных dbState, перерисовывая
-    один блок (без скроллинга) — только счетчики, без LastUpdate.
+    один блок (без скроллинга) — только счётчики МРЦ, Заблокированные GTIN, Заблокированные КМ.
 .DESCRIPTION
     Выполняет GET-запрос к http://<хост>:<порт>/api/v2/status.
-    - При "not_configured" предлагает выполнить инициализацию.
-    - При "initialization" опрашивает статус каждые 30 секунд,
-      отображая текущие docCount в одном перерисовываемом блоке.
-    Все параметры запрашиваются интерактивно с умолчаниями.
+    - При статусе "not_configured" предлагает выполнить инициализацию (POST /api/v2/init).
+    - При статусе "initialization" опрашивает статус каждые 30 секунд,
+      отображая текущие счётчики в одном перерисовываемом блоке.
+    Все параметры запрашиваются интерактивно с умолчаниями:
+      логин/пароль – admin/admin, хост – localhost, порт – 5995.
     В конце ожидает нажатия любой клавиши.
 .PARAMETER Login
     Имя пользователя.
@@ -91,12 +92,24 @@ function Get-Status {
     return Invoke-RestMethod -Uri $Uri -Headers $Headers -Method Get -ErrorAction Stop
 }
 
+# Функция перевода английских статусов в русские
+function Translate-Status {
+    param($status)
+    switch ($status) {
+        "not_configured" { return "не сконфигурирован" }
+        "initialization" { return "инициализация" }
+        "ready"          { return "готов" }
+        "active"         { return "штатный" }
+        default          { return $status }
+    }
+}
+
 try {
     $response = Get-Status -Uri $uri -Headers $authHeader
 
     # --- not_configured: инициализация ---
     if ($response.status -eq "not_configured") {
-        Write-Host "`nВнимание: статус сервера — not_configured. Требуется инициализация." -ForegroundColor Yellow
+        Write-Host "`nВнимание: статус сервера — «не сконфигурирован». Требуется инициализация." -ForegroundColor Yellow
         $token = Read-Host "Введите X-API-Key токен для инициализации"
         if ([string]::IsNullOrEmpty($token)) {
             Write-Host "Токен не введён, инициализация отменена." -ForegroundColor Red
@@ -126,10 +139,11 @@ try {
         }
     }
 
-    # --- Ожидание при initialization с перерисовкой одного блока (только счетчики) ---
+    # --- Ожидание при initialization с перерисовкой блока (надёжное выравнивание) ---
     $iteration = 0
     $blockTop = 0
-    $blockHeight = 5   # строк: заголовок, "DB State сейчас:", три счетчика (или "—")
+    $blockHeight = 5
+    $labelWidth = 22   # ширина для меток (по самой длинной — "Заблокированные GTIN")
 
     while ($response.status -eq "initialization") {
         $iteration++
@@ -140,22 +154,30 @@ try {
         }
 
         $newLines = [System.Collections.Generic.List[string]]::new()
-        $header = "[$iteration] Статус: initialization. Ожидание 30 сек. (Ctrl+C для выхода)"
+        $header = "[$iteration] Статус: инициализация. Ожидание 30 сек. (Ctrl+C для выхода)"
         $newLines.Add($header)
-        $newLines.Add("  DB State сейчас:")
+        $newLines.Add("  Текущие данные:")
 
         if ($response.dbState) {
             $db = $response.dbState
-            $newLines.Add("    min_price.docCount    : " + $(if ($db.min_price) { $db.min_price.docCount } else { "—" }))
-            $newLines.Add("    blocked_gtin.docCount : " + $(if ($db.blocked_gtin) { $db.blocked_gtin.docCount } else { "—" }))
-            $newLines.Add("    blocked_cis.docCount  : " + $(if ($db.blocked_cis) { $db.blocked_cis.docCount } else { "—" }))
+
+            $mrcLabel = "МРЦ".PadRight($labelWidth)
+            $mrcVal = if ($db.min_price) { $db.min_price.docCount } else { "—" }
+            $newLines.Add("    ${mrcLabel} : $mrcVal")
+
+            $gtinLabel = "Заблокированные GTIN".PadRight($labelWidth)
+            $gtinVal = if ($db.blocked_gtin) { $db.blocked_gtin.docCount } else { "—" }
+            $newLines.Add("    ${gtinLabel} : $gtinVal")
+
+            $cisLabel = "Заблокированные КМ".PadRight($labelWidth)
+            $cisVal = if ($db.blocked_cis) { $db.blocked_cis.docCount } else { "—" }
+            $newLines.Add("    ${cisLabel} : $cisVal")
         } else {
             $newLines.Add("    (нет данных)")
             $newLines.Add("")
             $newLines.Add("")
         }
 
-        # Дополняем до 5 строк пустыми, если нужно
         while ($newLines.Count -lt $blockHeight) { $newLines.Add("") }
 
         # Перерисовка блока
@@ -183,43 +205,63 @@ try {
         }
     }
 
-    # Перемещаемся за блок
     if ($iteration -gt 0) {
         [Console]::SetCursorPosition(0, $blockTop + $blockHeight)
     }
 
-    # --- Финальный вывод ---
+    # --- Финальный вывод с автоматическим выравниванием ---
     Write-Host "`n=== Ответ сервера (основные поля) ===" -ForegroundColor Cyan
-    Write-Host "Version       : $($response.version)"
-    Write-Host "Status        : $($response.status)"
-    Write-Host "OperationMode : $($response.operationMode)"
-    Write-Host "Name          : $($response.name)"
-    Write-Host "INN           : $($response.inn)"
-    Write-Host "Inst          : $($response.inst)"
-    Write-Host "IsGreyGtin    : $($response.isGreyGtin)"
-    Write-Host "ServiceUrl    : $($response.serviceUrl)"
-    Write-Host "DB Version    : $($response.dbVersion)"
 
+    # Собираем данные в упорядоченный словарь (сохраняет порядок)
+    $data = [ordered]@{
+        "Версия ПО"                       = $response.version
+        "Статус"                          = Translate-Status $response.status
+        "Режим работы"                    = if ($response.operationMode -eq 'active') {'штатный'} else {$response.operationMode}
+        "Название ПО"                     = $response.name
+        "ИНН участника оборота"           = $response.inn
+        "Идентификатор экземпляра ПО"     = $response.inst
+        "Проверка серых списков (GreyGtin)" = if ($response.isGreyGtin) {'включено'} else {'отключено'}
+        "Адрес сервиса"                   = $response.serviceUrl
+        "Идентификатор базы данных"       = $response.dbVersion
+    }
+
+    # Вычисляем максимальную длину ключа
+    $maxKeyLength = ($data.Keys | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+
+    # Выводим с форматированием через PadRight
+    foreach ($key in $data.Keys) {
+        $label = $key.PadRight($maxKeyLength)
+        $val = $data[$key]
+        Write-Host "  ${label} : $val"
+    }
+
+    # Временные метки
     if ($response.lastUpdate) {
         $dt = [DateTimeOffset]::FromUnixTimeMilliseconds($response.lastUpdate).LocalDateTime
-        Write-Host "LastUpdate    : $($response.lastUpdate) -> $($dt.ToString('yyyy-MM-dd HH:mm:ss'))"
+        $label = "Последнее обновление".PadRight($maxKeyLength)
+        Write-Host "  ${label} : $($dt.ToString('yyyy-MM-dd HH:mm:ss'))"
     }
     if ($response.lastSync) {
         $dtSync = [DateTimeOffset]::FromUnixTimeMilliseconds($response.lastSync).LocalDateTime
-        Write-Host "LastSync      : $($response.lastSync) -> $($dtSync.ToString('yyyy-MM-dd HH:mm:ss'))"
+        $label = "Последняя синхронизация".PadRight($maxKeyLength)
+        Write-Host "  ${label} : $($dtSync.ToString('yyyy-MM-dd HH:mm:ss'))"
     }
 
     if ($response.dbState) {
-        Write-Host "`n--- DB State ---" -ForegroundColor Yellow
+        Write-Host "`n--- Состояние базы данных ---" -ForegroundColor Yellow
         $db = $response.dbState
+        $labelWidthDB = $maxKeyLength  # используем ту же ширину для красоты
         if ($db.min_price) {
-            Write-Host "min_price.docCount    : $($db.min_price.docCount)"
+            $label = "МРЦ (документов)".PadRight($labelWidthDB)
+            Write-Host "  ${label} : $($db.min_price.docCount)"
         }
         if ($db.blocked_gtin) {
-            Write-Host "blocked_gtin.docCount : $($db.blocked_gtin.docCount)"
+            $label = "Заблокированные GTIN (документов)".PadRight($labelWidthDB)
+            Write-Host "  ${label} : $($db.blocked_gtin.docCount)"
         }
         if ($db.blocked_cis) {
-            Write-Host "blocked_cis.docCount  : $($db.blocked_cis.docCount)"
+            $label = "Заблокированные КМ (документов)".PadRight($labelWidthDB)
+            Write-Host "  ${label} : $($db.blocked_cis.docCount)"
         }
     }
 
