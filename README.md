@@ -26,4 +26,4 @@
     .EXAMPLE
     .\check_status.ps1
     .EXAMPLE
-    .\check_status.ps1 -Login vh -Password 242466 -HostName 192.168.0.97 -Port 5995
+    .\check_status.ps1 -Login admin -Password 12345 -HostName 192.168.0.123 -Port 5995
